@@ -136,7 +136,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output", default="", help="Optional output JSON path for experiment history"
     )
+    parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="Run without Ollama by generating deterministic mock agent responses",
+    )
     return parser.parse_args()
+
+
+def mock_response(agent: str, round_idx: int, goal: str) -> str:
+    return (
+        f"Core insight: {agent} aligns with the system objective by reducing uncertainty around '{goal}'.\n"
+        f"Concrete action: run experiment batch R{round_idx + 1} with ablations and cross-agent review.\n"
+        "Quantifiable metric: measure coherence gain target of 12% and entropy spread below 0.08."
+    )
 
 
 def main() -> None:
@@ -171,12 +184,15 @@ Your response must include:
 - Quantifiable metric
 """
 
-            response = query_ollama(
-                prompt,
-                model=args.model,
-                temperature=args.temperature,
-                endpoint=args.endpoint,
-            )
+            if args.mock:
+                response = mock_response(agent=agent, round_idx=round_idx, goal=args.goal)
+            else:
+                response = query_ollama(
+                    prompt,
+                    model=args.model,
+                    temperature=args.temperature,
+                    endpoint=args.endpoint,
+                )
             responses.append(response)
 
             ent = compute_entropy(response)
