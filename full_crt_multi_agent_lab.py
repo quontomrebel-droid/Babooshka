@@ -9,11 +9,12 @@ Example:
 
 from __future__ import annotations
 
-import json
 import argparse
+import json
+import sys
 from datetime import datetime
 from pathlib import Path
-
+from urllib import error, request
 
 # -------------------------
 # CONFIGURATION
@@ -32,34 +33,50 @@ AGENTS = {
     "Implementer": "You translate theory into executable and testable steps.",
 }
 
-agent_names = list(AGENTS.keys())
-N = len(agent_names)
+AGENT_NAMES = list(AGENTS.keys())
+N = len(AGENT_NAMES)
 
-# Coupling matrix (directed influence strengths)
 COUPLING_MATRIX = [
     [0.0, 0.6, 0.4],
     [0.5, 0.0, 0.7],
     [0.3, 0.6, 0.0],
 ]
 
+
 # -------------------------
 # LLM CALL
 # -------------------------
 
 def query_ollama(prompt: str, model: str, temperature: float, endpoint: str) -> str:
-    import requests
-
-    response = requests.post(
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = request.Request(
         endpoint,
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": temperature,
-        },
-        timeout=120,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
+
+    try:
+        with request.urlopen(req, timeout=120) as resp:
+            raw = resp.read().decode("utf-8")
+    except error.URLError as exc:
+        raise RuntimeError(
+            "Could not reach Ollama endpoint. Ensure Ollama is running and endpoint is correct. "
+            f"endpoint={endpoint}"
+        ) from exc
+
+    try:
+        content = json.loads(raw)
+        return content["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "Received an unexpected response format from the LLM endpoint."
+        ) from exc
 
 
 # -------------------------
@@ -71,7 +88,6 @@ def compute_entropy(text: str) -> float:
     if not tokens:
         return 0.0
     return len(set(tokens)) / len(tokens)
-
 
 
 def reward_score(response: str) -> int:
@@ -86,7 +102,6 @@ def reward_score(response: str) -> int:
     return score
 
 
-
 def phase(conf: float) -> str:
     if conf < 0.4:
         return "Fragmented"
@@ -98,7 +113,6 @@ def phase(conf: float) -> str:
 # -------------------------
 # SIMULATION LOOP
 # -------------------------
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -118,17 +132,12 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional path to save coherence plot (recommended for headless environments)",
     )
+    parser.add_argument("--no-plot", action="store_true", help="Skip plotting entirely")
     parser.add_argument(
-        "--no-plot",
-        action="store_true",
-        help="Skip plotting entirely",
-    )
-    parser.add_argument(
-        "--output",
-        default="",
-        help="Optional output JSON path for experiment history",
+        "--output", default="", help="Optional output JSON path for experiment history"
     )
     return parser.parse_args()
+
 
 def main() -> None:
     args = parse_args()
@@ -136,20 +145,17 @@ def main() -> None:
     if args.rounds <= 0:
         raise ValueError("--rounds must be > 0")
 
-    coupling_matrix = COUPLING_MATRIX
     agent_confidence = [0.5] * N
     history = []
     coherence_over_time = []
-
     context_memory = ""
 
     for round_idx in range(args.rounds):
         print(f"\n===== ROUND {round_idx + 1} =====")
-
         responses = []
         entropies = []
 
-        for i, agent in enumerate(agent_names):
+        for i, agent in enumerate(AGENT_NAMES):
             prompt = f"""
 Role: {AGENTS[agent]}
 
@@ -177,9 +183,7 @@ Your response must include:
             rew = reward_score(response)
             entropies.append(ent)
 
-            # Reinforcement update
-            agent_confidence[i] += 0.05 * rew
-            agent_confidence[i] = min(agent_confidence[i], 1.0)
+            agent_confidence[i] = min(agent_confidence[i] + 0.05 * rew, 1.0)
 
             print(f"\n--- {agent} ---")
             print(response[:600])
@@ -187,9 +191,8 @@ Your response must include:
                 f"Entropy: {ent:.3f} | Reward: {rew} | Confidence: {agent_confidence[i]:.2f}"
             )
 
-        # Entropy propagation
         propagated_entropy = [
-            sum(coupling_matrix[row][col] * entropies[col] for col in range(N))
+            sum(COUPLING_MATRIX[row][col] * entropies[col] for col in range(N))
             for row in range(N)
         ]
 
@@ -198,12 +201,9 @@ Your response must include:
         coherence = 1 - variance
         coherence_over_time.append(float(coherence))
 
-        # Update context memory (weighted by confidence)
         weighted_context = ""
         for i, resp in enumerate(responses):
-            weight = agent_confidence[i]
-            weighted_context += f"\n[{agent_names[i]} | w={weight:.2f}]\n{resp}\n"
-
+            weighted_context += f"\n[{AGENT_NAMES[i]} | w={agent_confidence[i]:.2f}]\n{resp}\n"
         context_memory = weighted_context
 
         history.append(
@@ -219,10 +219,6 @@ Your response must include:
 
         print(f"\n>>> System Coherence: {coherence:.4f}")
         print("Phases:", [phase(c) for c in agent_confidence])
-
-    # -------------------------
-    # VISUALIZATION
-    # -------------------------
 
     if not args.no_plot:
         import matplotlib.pyplot as plt
@@ -242,10 +238,6 @@ Your response must include:
         else:
             plt.show()
 
-    # -------------------------
-    # SAVE EXPERIMENT
-    # -------------------------
-
     filename = args.output or f"crt_experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     output_path = Path(filename)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -256,4 +248,8 @@ Your response must include:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
