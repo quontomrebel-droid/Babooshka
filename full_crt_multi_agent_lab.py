@@ -1,25 +1,30 @@
 """Full CRT multi-agent lab simulation using a local Ollama endpoint.
 
 Requires Ollama running on http://localhost:11434 with a compatible chat model.
+
+Example:
+    python full_crt_multi_agent_lab.py --rounds 3 --no-plot
+    python full_crt_multi_agent_lab.py --save-plot artifacts/coherence.png
 """
 
 from __future__ import annotations
 
 import json
+import argparse
 from datetime import datetime
+from pathlib import Path
 
-import matplotlib.pyplot as plt
-import numpy as np
-import requests
 
 # -------------------------
 # CONFIGURATION
 # -------------------------
 
-MODEL = "llama3.1:8b"
-TEMPERATURE = 0.4
-ROUNDS = 5
-GOAL = "Design a measurable entropy propagation model for adaptive multi-agent systems."
+DEFAULT_MODEL = "llama3.1:8b"
+DEFAULT_TEMPERATURE = 0.4
+DEFAULT_ROUNDS = 5
+DEFAULT_GOAL = (
+    "Design a measurable entropy propagation model for adaptive multi-agent systems."
+)
 
 AGENTS = {
     "Architect": "You optimize systemic coherence and structural clarity.",
@@ -31,33 +36,25 @@ agent_names = list(AGENTS.keys())
 N = len(agent_names)
 
 # Coupling matrix (directed influence strengths)
-coupling_matrix = np.array(
-    [
-        [0.0, 0.6, 0.4],
-        [0.5, 0.0, 0.7],
-        [0.3, 0.6, 0.0],
-    ]
-)
-
-# Initial confidence
-agent_confidence = np.ones(N) * 0.5
-
-# History logs
-history = []
-coherence_over_time = []
-
+COUPLING_MATRIX = [
+    [0.0, 0.6, 0.4],
+    [0.5, 0.0, 0.7],
+    [0.3, 0.6, 0.0],
+]
 
 # -------------------------
 # LLM CALL
 # -------------------------
 
-def query_ollama(prompt: str) -> str:
+def query_ollama(prompt: str, model: str, temperature: float, endpoint: str) -> str:
+    import requests
+
     response = requests.post(
-        "http://localhost:11434/v1/chat/completions",
+        endpoint,
         json={
-            "model": MODEL,
+            "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": TEMPERATURE,
+            "temperature": temperature,
         },
         timeout=120,
     )
@@ -102,10 +99,51 @@ def phase(conf: float) -> str:
 # SIMULATION LOOP
 # -------------------------
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run a CRT multi-agent entropy propagation simulation."
+    )
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
+    parser.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
+    parser.add_argument("--goal", default=DEFAULT_GOAL)
+    parser.add_argument(
+        "--endpoint",
+        default="http://localhost:11434/v1/chat/completions",
+        help="Ollama-compatible chat completions endpoint",
+    )
+    parser.add_argument(
+        "--save-plot",
+        default="",
+        help="Optional path to save coherence plot (recommended for headless environments)",
+    )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip plotting entirely",
+    )
+    parser.add_argument(
+        "--output",
+        default="",
+        help="Optional output JSON path for experiment history",
+    )
+    return parser.parse_args()
+
 def main() -> None:
+    args = parse_args()
+
+    if args.rounds <= 0:
+        raise ValueError("--rounds must be > 0")
+
+    coupling_matrix = COUPLING_MATRIX
+    agent_confidence = [0.5] * N
+    history = []
+    coherence_over_time = []
+
     context_memory = ""
 
-    for round_idx in range(ROUNDS):
+    for round_idx in range(args.rounds):
         print(f"\n===== ROUND {round_idx + 1} =====")
 
         responses = []
@@ -116,7 +154,7 @@ def main() -> None:
 Role: {AGENTS[agent]}
 
 System Goal:
-{GOAL}
+{args.goal}
 
 Shared Context:
 {context_memory}
@@ -127,7 +165,12 @@ Your response must include:
 - Quantifiable metric
 """
 
-            response = query_ollama(prompt)
+            response = query_ollama(
+                prompt,
+                model=args.model,
+                temperature=args.temperature,
+                endpoint=args.endpoint,
+            )
             responses.append(response)
 
             ent = compute_entropy(response)
@@ -144,12 +187,15 @@ Your response must include:
                 f"Entropy: {ent:.3f} | Reward: {rew} | Confidence: {agent_confidence[i]:.2f}"
             )
 
-        entropies = np.array(entropies)
-
         # Entropy propagation
-        propagated_entropy = coupling_matrix @ entropies
+        propagated_entropy = [
+            sum(coupling_matrix[row][col] * entropies[col] for col in range(N))
+            for row in range(N)
+        ]
 
-        coherence = 1 - np.var(propagated_entropy)
+        mean = sum(propagated_entropy) / len(propagated_entropy)
+        variance = sum((x - mean) ** 2 for x in propagated_entropy) / len(propagated_entropy)
+        coherence = 1 - variance
         coherence_over_time.append(float(coherence))
 
         # Update context memory (weighted by confidence)
@@ -164,9 +210,9 @@ Your response must include:
             {
                 "round": round_idx + 1,
                 "responses": responses,
-                "entropy": entropies.tolist(),
-                "propagated_entropy": propagated_entropy.tolist(),
-                "confidence": agent_confidence.tolist(),
+                "entropy": list(entropies),
+                "propagated_entropy": list(propagated_entropy),
+                "confidence": list(agent_confidence),
                 "coherence": float(coherence),
             }
         )
@@ -178,24 +224,35 @@ Your response must include:
     # VISUALIZATION
     # -------------------------
 
-    plt.figure()
-    plt.plot(range(1, ROUNDS + 1), coherence_over_time)
-    plt.axhline(0.6)
-    plt.axhline(0.8)
-    plt.title("CRT Coherence Over Time")
-    plt.xlabel("Round")
-    plt.ylabel("Coherence")
-    plt.show()
+    if not args.no_plot:
+        import matplotlib.pyplot as plt
+
+        plt.figure()
+        plt.plot(range(1, args.rounds + 1), coherence_over_time)
+        plt.axhline(0.6)
+        plt.axhline(0.8)
+        plt.title("CRT Coherence Over Time")
+        plt.xlabel("Round")
+        plt.ylabel("Coherence")
+        if args.save_plot:
+            plot_path = Path(args.save_plot)
+            plot_path.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(plot_path, dpi=160, bbox_inches="tight")
+            print(f"Saved plot to: {plot_path}")
+        else:
+            plt.show()
 
     # -------------------------
     # SAVE EXPERIMENT
     # -------------------------
 
-    filename = f"crt_experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    with open(filename, "w", encoding="utf-8") as f:
+    filename = args.output or f"crt_experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    output_path = Path(filename)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(history, f, indent=2)
 
-    print(f"\nExperiment log saved as: {filename}")
+    print(f"\nExperiment log saved as: {output_path}")
 
 
 if __name__ == "__main__":
